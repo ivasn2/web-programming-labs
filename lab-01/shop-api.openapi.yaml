@@ -1,0 +1,1292 @@
+openapi: 3.0.3
+info:
+  title: Shop API
+  version: 1.0.0
+  contact:
+    name: API Team
+    email: api@shop.example
+  description: |
+    ## Назначение
+    REST API интернет-магазина: управление каталогами, категориями, товарами и заказами.
+    Позволяет фронтенду и внешним интеграциям работать с полным жизненным циклом заказа.
+
+    ## Ошибки
+    Все ошибки возвращаются в формате `application/problem+json` (RFC 9457).
+
+    | Код | Тип (type) | Когда |
+    |-----|-----------|-------|
+    | 400 | .../bad-request | некорректный запрос (битый JSON, невалидный UUID в пути) |
+    | 401 | .../unauthorized | отсутствует или просрочен токен |
+    | 403 | .../forbidden | нет нужного scope |
+    | 404 | .../not-found | ресурс не найден |
+    | 409 | .../conflict | конфликт уникальности/состояния (дубликат sku, повтор Idempotency-Key с другим телом) |
+    | 422 | .../unprocessable-entity | нарушение бизнес-правила |
+    | 429 | .../too-many-requests | превышен лимит запросов |
+    | 500 | .../internal-server-error | непредвиденная ошибка сервера |
+
+    ## Версионирование
+    Используется URI-версионирование (`/v1`). Аддитивные изменения (новые поля,
+    новые эндпоинты) не меняют версию. Ломающие изменения выпускаются как `/v2`;
+    старая версия поддерживается не менее 6 месяцев с заголовками
+    `Deprecation: true` и `Sunset: <RFC 1123 date>`.
+
+    ## Идемпотентность
+    `POST /v1/orders` принимает заголовок `Idempotency-Key` (UUID). Повторный
+    запрос с тем же ключом и тем же телом в течение 24 часов возвращает
+    сохранённый результат первого запроса (код 201). Тот же ключ с другим
+    телом — 409. Без ключа запрос выполняется, но без гарантии идемпотентности.
+
+    ## Rate limiting
+    Лимит — 100 запросов в минуту на токен. При превышении — 429 с заголовком
+    `Retry-After` (секунды) и заголовками `X-RateLimit-Limit`,
+    `X-RateLimit-Remaining`, `X-RateLimit-Reset`.
+servers:
+  - url: https://staging.api.shop.example/v1
+    description: Staging
+  - url: https://api.shop.example/v1
+    description: Production
+tags:
+  - name: catalogs
+    description: Управление каталогами
+  - name: categories
+    description: Иерархия категорий внутри каталогов
+  - name: products
+    description: Карточки товаров
+  - name: orders
+    description: Оформление и обработка заказов
+security:
+  - bearerAuth: []
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+
+    Catalog:
+      type: object
+      description: Каталог — товар верхнего уровня иерархии (например, «Электроника»)
+      required: [id, name, slug, created_at, updated_at]
+      properties:
+        id:
+          type: integer
+          format: int64
+          description: Идентификатор, генерируется сервером
+        name:
+          type: string
+          minLength: 3
+          maxLength: 100
+        slug:
+          type: string
+          pattern: '^[a-z0-9]+(-[a-z0-9]+)*$'
+          minLength: 2
+          maxLength: 60
+          description: Уникальный человекочитаемый идентификатор
+        description:
+          type: string
+          maxLength: 500
+        is_active:
+          type: boolean
+          default: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      example:
+        id: 1
+        name: Электроника
+        slug: elektronika
+        description: Бытовая и цифровая техника
+        is_active: true
+        created_at: "2026-01-10T09:00:00Z"
+        updated_at: "2026-01-10T09:00:00Z"
+
+    CatalogCreate:
+      type: object
+      description: Тело запроса для создания каталога
+      required: [name, slug]
+      properties:
+        name:
+          type: string
+          minLength: 3
+          maxLength: 100
+        slug:
+          type: string
+          pattern: '^[a-z0-9]+(-[a-z0-9]+)*$'
+          minLength: 2
+          maxLength: 60
+        description:
+          type: string
+          maxLength: 500
+        is_active:
+          type: boolean
+          default: true
+      example:
+        name: Электроника
+        slug: elektronika
+        description: Бытовая и цифровая техника
+
+    CatalogUpdate:
+      type: object
+      description: Тело запроса PATCH (JSON Merge Patch, RFC 7386) — все поля опциональны
+      properties:
+        name:
+          type: string
+          minLength: 3
+          maxLength: 100
+        description:
+          type: string
+          maxLength: 500
+        is_active:
+          type: boolean
+      example:
+        is_active: false
+
+    Category:
+      type: object
+      description: Категория внутри каталога (иерархия — «Электроника → Ноутбуки»)
+      required: [id, catalog_id, name, slug, created_at, updated_at]
+      properties:
+        id:
+          type: integer
+          format: int64
+          description: Идентификатор, генерируется сервером
+        catalog_id:
+          type: integer
+          format: int64
+          description: Каталог, к которому принадлежит категория. Должен существовать, иначе 422
+        name:
+          type: string
+          minLength: 2
+          maxLength: 120
+        slug:
+          type: string
+          pattern: '^[a-z0-9]+(-[a-z0-9]+)*$'
+          description: Уникален в пределах одного каталога (не глобально)
+        image_url:
+          type: string
+          format: uri
+        sort_order:
+          type: integer
+          format: int32
+          default: 0
+        is_active:
+          type: boolean
+          default: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      example:
+        id: 10
+        catalog_id: 1
+        name: Ноутбуки
+        slug: noutbuki
+        image_url: https://cdn.shop.example/categories/notebooks.png
+        sort_order: 1
+        is_active: true
+        created_at: "2026-01-11T10:00:00Z"
+        updated_at: "2026-01-11T10:00:00Z"
+
+    CategoryCreate:
+      type: object
+      required: [name, slug]
+      properties:
+        name:
+          type: string
+          minLength: 2
+          maxLength: 120
+        slug:
+          type: string
+          pattern: '^[a-z0-9]+(-[a-z0-9]+)*$'
+        image_url:
+          type: string
+          format: uri
+        sort_order:
+          type: integer
+          format: int32
+          default: 0
+        is_active:
+          type: boolean
+          default: true
+      example:
+        name: Ноутбуки
+        slug: noutbuki
+        sort_order: 1
+
+    CategoryUpdate:
+      type: object
+      description: Тело запроса PATCH (JSON Merge Patch, RFC 7386) — все поля опциональны
+      properties:
+        name:
+          type: string
+          minLength: 2
+          maxLength: 120
+        image_url:
+          type: string
+          format: uri
+        sort_order:
+          type: integer
+          format: int32
+        is_active:
+          type: boolean
+      example:
+        is_active: false
+
+    Product:
+      type: object
+      description: Товар
+      required: [id, sku, name, category_id, price, stock, status, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Идентификатор (UUID v4), генерируется сервером
+        sku:
+          type: string
+          pattern: '^[A-Z0-9-]+$'
+          minLength: 5
+          maxLength: 32
+          description: Уникальный артикул. Нарушение уникальности — 409. Присваивается при создании и не может быть изменён.
+        name:
+          type: string
+          minLength: 2
+          maxLength: 200
+        description:
+          type: string
+          maxLength: 5000
+        category_id:
+          type: integer
+          format: int64
+          description: Категория должна существовать и быть is_active true, иначе 422
+        price:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 10000000
+          description: Цена в рублях, целое число
+        stock:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 1000000
+        status:
+          type: string
+          enum: [draft, active, archived]
+          default: draft
+        images:
+          type: array
+          maxItems: 10
+          items:
+            type: string
+            format: uri
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      example:
+        id: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+        sku: NB-IGR-156
+        name: Игровой ноутбук 15.6"
+        description: Мощный игровой ноутбук с дискретной видеокартой
+        category_id: 10
+        price: 89990
+        stock: 12
+        status: active
+        images:
+          - https://cdn.shop.example/products/nb-igr-156-1.jpg
+        created_at: "2026-01-12T08:00:00Z"
+        updated_at: "2026-01-12T08:00:00Z"
+
+    ProductCreate:
+      type: object
+      required: [sku, name, category_id, price, stock]
+      properties:
+        sku:
+          type: string
+          pattern: '^[A-Z0-9-]+$'
+          minLength: 5
+          maxLength: 32
+        name:
+          type: string
+          minLength: 2
+          maxLength: 200
+        description:
+          type: string
+          maxLength: 5000
+        category_id:
+          type: integer
+          format: int64
+        price:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 10000000
+        stock:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 1000000
+        status:
+          type: string
+          enum: [draft, active, archived]
+          default: draft
+        images:
+          type: array
+          maxItems: 10
+          items:
+            type: string
+            format: uri
+      example:
+        sku: NB-IGR-156
+        name: Игровой ноутбук 15.6"
+        category_id: 10
+        price: 89990
+        stock: 12
+        status: draft
+
+    ProductUpdate:
+      type: object
+      description: JSON Merge Patch (RFC 7386) — все поля опциональны. sku изменить нельзя.
+      properties:
+        name:
+          type: string
+          minLength: 2
+          maxLength: 200
+        description:
+          type: string
+          maxLength: 5000
+        category_id:
+          type: integer
+          format: int64
+        price:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 10000000
+        stock:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 1000000
+        status:
+          type: string
+          enum: [draft, active, archived]
+        images:
+          type: array
+          maxItems: 10
+          items:
+            type: string
+            format: uri
+      example:
+        price: 79990
+        stock: 5
+
+    Customer:
+      type: object
+      description: Данные покупателя, привязанные к заказу
+      required: [name, email, phone]
+      properties:
+        name:
+          type: string
+          minLength: 2
+          maxLength: 120
+        email:
+          type: string
+          format: email
+        phone:
+          type: string
+          pattern: '^\+[1-9]\d{6,14}$'
+          description: Телефон в формате E.164
+      example:
+        name: Иван Петров
+        email: ivan.petrov@example.com
+        phone: "+79161234567"
+
+    OrderItemInput:
+      type: object
+      description: Элемент заказа при создании — цена клиентом не передаётся
+      required: [product_id, quantity]
+      properties:
+        product_id:
+          type: string
+          format: uuid
+          description: Товар должен существовать, быть status active и иметь stock > 0, иначе 422
+        quantity:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 999
+      example:
+        product_id: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+        quantity: 2
+
+    OrderItem:
+      type: object
+      description: Элемент заказа в ответе — с зафиксированной ценой
+      required: [product_id, quantity, unit_price]
+      properties:
+        product_id:
+          type: string
+          format: uuid
+        quantity:
+          type: integer
+          format: int32
+        unit_price:
+          type: integer
+          format: int64
+          description: Копия цены товара на момент оформления заказа (рубли)
+      example:
+        product_id: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+        quantity: 2
+        unit_price: 89990
+
+    OrderCreate:
+      type: object
+      description: Тело запроса для создания заказа
+      required: [customer, items]
+      properties:
+        customer:
+          $ref: '#/components/schemas/Customer'
+        items:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/OrderItemInput'
+      example:
+        customer:
+          name: Иван Петров
+          email: ivan.petrov@example.com
+          phone: "+79161234567"
+        items:
+          - product_id: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+            quantity: 2
+
+    Order:
+      type: object
+      description: Заказ
+      required: [id, number, customer, items, status, total_amount, created_at, updated_at]
+      properties:
+        id:
+          type: integer
+          format: int64
+        number:
+          type: string
+          pattern: '^ORD-\d{4}-\d{6}$'
+          description: Генерируется сервером, уникален
+        customer:
+          $ref: '#/components/schemas/Customer'
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/OrderItem'
+        status:
+          type: string
+          enum: [pending, confirmed, shipped, delivered, cancelled]
+          default: pending
+        total_amount:
+          type: integer
+          format: int64
+          description: Сумма unit_price × quantity по всем items, считается сервером
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      example:
+        id: 501
+        number: ORD-2026-000042
+        customer:
+          name: Иван Петров
+          email: ivan.petrov@example.com
+          phone: "+79161234567"
+        items:
+          - product_id: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+            quantity: 2
+            unit_price: 89990
+        status: pending
+        total_amount: 179980
+        created_at: "2026-01-15T12:00:00Z"
+        updated_at: "2026-01-15T12:00:00Z"
+
+    OrderStatusUpdate:
+      type: object
+      description: Тело запроса для смены статуса заказа
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [confirmed, shipped, delivered, cancelled]
+          description: |
+            Допустимые переходы: pending→confirmed→shipped→delivered,
+            и pending/confirmed→cancelled. Недопустимый переход — 422.
+      example:
+        status: confirmed
+
+    Error:
+      type: object
+      description: Тело ошибки в формате RFC 9457 (application/problem+json)
+      required: [type, title, status, detail, instance]
+      properties:
+        type:
+          type: string
+          format: uri
+          description: URI типа ошибки
+        title:
+          type: string
+          description: Краткое человекочитаемое описание
+        status:
+          type: integer
+          description: HTTP-код ответа
+        detail:
+          type: string
+          description: Контекст — что именно не так
+        instance:
+          type: string
+          description: URI запроса, вызвавшего ошибку
+        errors:
+          type: array
+          description: Полевые ошибки. Обязателен при 422.
+          items:
+            type: object
+            required: [field, code, message]
+            properties:
+              field:
+                type: string
+              code:
+                type: string
+              message:
+                type: string
+      example:
+        type: https://api.shop.example/errors/product-not-found
+        title: Product not found
+        status: 404
+        detail: "Product with id '3fa85f64-5717-4562-b3fc-2c963f66afa6' was not found"
+        instance: /v1/products/3fa85f64-5717-4562-b3fc-2c963f66afa6
+
+    Pagination:
+      type: object
+      description: Метаданные пагинации, единые для всех списков
+      required: [page, limit, total_items, total_pages, has_next, has_prev]
+      properties:
+        page:
+          type: integer
+          format: int32
+        limit:
+          type: integer
+          format: int32
+        total_items:
+          type: integer
+          format: int64
+        total_pages:
+          type: integer
+          format: int32
+        has_next:
+          type: boolean
+        has_prev:
+          type: boolean
+      example:
+        page: 1
+        limit: 20
+        total_items: 137
+        total_pages: 7
+        has_next: true
+        has_prev: false
+
+    CatalogList:
+      type: object
+      required: [data, pagination]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Catalog'
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+
+    CategoryList:
+      type: object
+      required: [data, pagination]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Category'
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+
+    ProductList:
+      type: object
+      required: [data, pagination]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Product'
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+
+    OrderList:
+      type: object
+      required: [data, pagination]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Order'
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+
+  parameters:
+    page:
+      name: page
+      in: query
+      description: Номер страницы
+      required: false
+      schema:
+        type: integer
+        format: int32
+        minimum: 1
+        default: 1
+    limit:
+      name: limit
+      in: query
+      description: Размер страницы
+      required: false
+      schema:
+        type: integer
+        format: int32
+        minimum: 1
+        maximum: 100
+        default: 20
+    idempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: |
+        UUID для гарантии идемпотентности. Повтор с тем же ключом и телом за 24ч
+        вернёт сохранённый результат первого запроса (201). Тот же ключ с другим
+        телом — 409. Без ключа гарантии нет.
+      schema:
+        type: string
+        format: uuid
+    catalogId:
+      name: catalogId
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+    categoryId:
+      name: categoryId
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+    productId:
+      name: productId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    orderId:
+      name: orderId
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+
+  headers:
+    RateLimitLimit:
+      description: Лимит запросов в минуту
+      schema:
+        type: integer
+    RateLimitRemaining:
+      description: Остаток запросов в текущем окне
+      schema:
+        type: integer
+    RateLimitReset:
+      description: Unix-время сброса окна
+      schema:
+        type: integer
+    RetryAfter:
+      description: Через сколько секунд можно повторить запрос
+      schema:
+        type: integer
+
+  responses:
+    BadRequest:
+      description: Некорректный запрос
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+    Unauthorized:
+      description: Нет токена или токен просрочен
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+    Forbidden:
+      description: Нет нужного scope
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+    NotFound:
+      description: Ресурс не найден
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            type: https://api.shop.example/errors/not-found
+            title: Not found
+            status: 404
+            detail: Resource was not found
+            instance: /v1/products/3fa85f64-5717-4562-b3fc-2c963f66afa6
+
+    Conflict:
+      description: Конфликт уникальности/состояния
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+    UnprocessableEntity:
+      description: Нарушение бизнес-правила
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+    TooManyRequests:
+      description: Превышен лимит запросов
+      headers:
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
+        X-RateLimit-Limit:
+          $ref: '#/components/headers/RateLimitLimit'
+        X-RateLimit-Remaining:
+          $ref: '#/components/headers/RateLimitRemaining'
+        X-RateLimit-Reset:
+          $ref: '#/components/headers/RateLimitReset'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+    InternalError:
+      description: Непредвиденная ошибка сервера
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+paths:
+  /v1/catalogs:
+    get:
+      tags: [catalogs]
+      operationId: listCatalogs
+      summary: Список каталогов
+      description: Публичный эндпоинт, пагинация.
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/page'
+        - $ref: '#/components/parameters/limit'
+      responses:
+        '200':
+          description: Список каталогов
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CatalogList'
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    post:
+      tags: [catalogs]
+      operationId: createCatalog
+      summary: Создать каталог
+      description: Требует scope catalogs:write. При успехе — 201, Location, тело каталога.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CatalogCreate'
+      responses:
+        '201':
+          description: Каталог создан
+          headers:
+            Location:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Catalog'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /v1/catalogs/{catalogId}:
+    parameters:
+      - $ref: '#/components/parameters/catalogId'
+    get:
+      tags: [catalogs]
+      operationId: getCatalog
+      summary: Получить каталог по id
+      security: []
+      responses:
+        '200':
+          description: Каталог
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Catalog'
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    patch:
+      tags: [catalogs]
+      operationId: updateCatalog
+      summary: Частично обновить каталог
+      description: JSON Merge Patch (RFC 7386). Требует scope catalogs:write.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CatalogUpdate'
+      responses:
+        '200':
+          description: Обновлённый каталог
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Catalog'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    delete:
+      tags: [catalogs]
+      operationId: deleteCatalog
+      summary: Удалить каталог
+      description: 409, если у каталога есть категории. Требует scope catalogs:write.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '204':
+          description: Каталог удалён
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /v1/catalogs/{catalogId}/categories:
+    parameters:
+      - $ref: '#/components/parameters/catalogId'
+    get:
+      tags: [categories]
+      operationId: listCategoriesByCatalog
+      summary: Список категорий каталога
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/page'
+        - $ref: '#/components/parameters/limit'
+      responses:
+        '200':
+          description: Список категорий
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CategoryList'
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    post:
+      tags: [categories]
+      operationId: createCategory
+      summary: Создать категорию в каталоге
+      description: Каталог берётся из пути. Каталог должен существовать, иначе 422. Требует scope catalogs:write.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CategoryCreate'
+      responses:
+        '201':
+          description: Категория создана
+          headers:
+            Location:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Category'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /v1/categories/{categoryId}:
+    parameters:
+      - $ref: '#/components/parameters/categoryId'
+    get:
+      tags: [categories]
+      operationId: getCategory
+      summary: Получить категорию по id
+      security: []
+      responses:
+        '200':
+          description: Категория
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Category'
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    patch:
+      tags: [categories]
+      operationId: updateCategory
+      summary: Частично обновить категорию
+      description: JSON Merge Patch (RFC 7386). Требует scope catalogs:write.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CategoryUpdate'
+      responses:
+        '200':
+          description: Обновлённая категория
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Category'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    delete:
+      tags: [categories]
+      operationId: deleteCategory
+      summary: Удалить категорию
+      description: 409, если у категории есть товары. Требует scope catalogs:write.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '204':
+          description: Категория удалена
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /v1/products:
+    get:
+      tags: [products]
+      operationId: listProducts
+      summary: Список товаров с фильтрами
+      description: |
+        Пагинация + фильтры: q (поиск по name/sku, ≥2 символов), category_id, status,
+        min_price/max_price (рубли), sort (name|price|created_at, default created_at),
+        direction (asc|desc, default desc).
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/page'
+        - $ref: '#/components/parameters/limit'
+        - name: q
+          in: query
+          schema: { type: string, minLength: 2 }
+        - name: category_id
+          in: query
+          schema: { type: integer, format: int64 }
+        - name: status
+          in: query
+          schema: { type: string, enum: [draft, active, archived] }
+        - name: min_price
+          in: query
+          schema: { type: integer, format: int64 }
+        - name: max_price
+          in: query
+          schema: { type: integer, format: int64 }
+        - name: sort
+          in: query
+          schema: { type: string, enum: [name, price, created_at], default: created_at }
+        - name: direction
+          in: query
+          schema: { type: string, enum: [asc, desc], default: desc }
+      responses:
+        '200':
+          description: Список товаров
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProductList'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    post:
+      tags: [products]
+      operationId: createProduct
+      summary: Создать товар
+      description: Требует scope products:write. Опционально поддерживает Idempotency-Key.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/idempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProductCreate'
+      responses:
+        '201':
+          description: Товар создан
+          headers:
+            Location:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Product'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /v1/products/{productId}:
+    parameters:
+      - $ref: '#/components/parameters/productId'
+    get:
+      tags: [products]
+      operationId: getProduct
+      summary: Получить товар по id
+      security: []
+      responses:
+        '200':
+          description: Товар
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Product'
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    put:
+      tags: [products]
+      operationId: replaceProduct
+      summary: Полностью заменить товар
+      description: Требует все поля целиком (в отличие от PATCH). Scope products:write.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProductCreate'
+      responses:
+        '200':
+          description: Товар заменён
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Product'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    patch:
+      tags: [products]
+      operationId: updateProduct
+      summary: Частично обновить товар
+      description: JSON Merge Patch (RFC 7386). Scope products:write.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProductUpdate'
+      responses:
+        '200':
+          description: Товар обновлён
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Product'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    delete:
+      tags: [products]
+      operationId: deleteProduct
+      summary: Удалить товар
+      security: [{ bearerAuth: [] }]
+      responses:
+        '204':
+          description: Товар удалён
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /v1/orders:
+    get:
+      tags: [orders]
+      operationId: listOrders
+      summary: Список заказов
+      description: Требует scope orders:read. Пагинация.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/page'
+        - $ref: '#/components/parameters/limit'
+      responses:
+        '200':
+          description: Список заказов
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderList'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    post:
+      tags: [orders]
+      operationId: createOrder
+      summary: Создать заказ
+      description: |
+        Требует scope orders:write. Каждый item.product_id должен существовать,
+        быть status active и иметь stock > 0, иначе 422. unit_price и total_amount
+        считаются сервером. Поддерживает Idempotency-Key: повтор с тем же ключом
+        и телом за 24ч возвращает тот же заказ (201); тот же ключ, другое тело — 409.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/idempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OrderCreate'
+      responses:
+        '201':
+          description: Заказ создан
+          headers:
+            Location:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          description: Конфликт (в т.ч. Idempotency-Key с другим телом)
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                type: https://api.shop.example/errors/idempotency-key-reuse
+                title: Idempotency key reuse
+                status: 409
+                detail: Same Idempotency-Key used with a different request body
+                instance: /v1/orders
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /v1/orders/{orderId}:
+    parameters:
+      - $ref: '#/components/parameters/orderId'
+    get:
+      tags: [orders]
+      operationId: getOrder
+      summary: Получить заказ по id
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Заказ
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /v1/orders/{orderId}/status:
+    parameters:
+      - $ref: '#/components/parameters/orderId'
+    patch:
+      tags: [orders]
+      operationId: updateOrderStatus
+      summary: Изменить статус заказа
+      description: |
+        Матрица переходов: pending→confirmed→shipped→delivered;
+        pending и confirmed→cancelled. delivered и cancelled — финальные,
+        дальнейшие переходы невозможны. Недопустимый переход — 422.
+        Требует scope orders:write.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OrderStatusUpdate'
+      responses:
+        '200':
+          description: Статус обновлён
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '500': { $ref: '#/components/responses/InternalError' }
